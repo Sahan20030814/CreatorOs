@@ -408,7 +408,7 @@ exports.getAvailableSlots = async (req, res) => {
       userId: creator._id,
       status: "scheduled",
       startTime: { $gte: startOfDay, $lte: endOfDay },
-    });
+    }).lean();
 
     const now = new Date();
     const candidateSlots = [];
