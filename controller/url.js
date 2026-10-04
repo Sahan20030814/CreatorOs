@@ -3,6 +3,8 @@ const shortid = require("shortid");
 const QRCode = require("qrcode");
 const mongoose = require("mongoose");
 const bcrypt = require("bcryptjs"); // swap to 'bcrypt' if that's what model/user.js uses
+const net = require("net");
+const dns = require("dns").promises;
 const Url = require("../model/url");
 const dns = require("dns");
 const net = require("net");
@@ -84,12 +86,7 @@ async function validateURL(urlString) {
     }
 
     // Resolve hostname to IP addresses and check each one
-    const addresses = await new Promise((resolve) => {
-        dns.lookup(hostname, { all: true }, (err, addrs) => {
-            if (err) resolve([]);
-            else resolve(addrs.map(a => a.address));
-        });
-    });
+    const addresses = await dns.lookup(hostname, { all: true });
 
     for (const addr of addresses) {
         if (isPrivateIP(addr)) {
