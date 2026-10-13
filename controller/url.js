@@ -7,7 +7,7 @@ const net = require("net");
 const dns = require("dns").promises;
 const Url = require("../model/url");
 const { isValidUrl } = require("../utils/validators");
-const { assertSafePublicHttpUrl } = require("../utils/ssrf");
+const { assertSafePublicHttpUrl, safeFetchText } = require("../utils/ssrf");
 const asyncHandler = require("../utils/asyncHandler");
 
 const MAX_TAGS_PER_LINK = 10;
@@ -33,22 +33,31 @@ function parseListLimit(value) {
   return Math.min(parsed, MAX_LINK_LIST_LIMIT);
 }
 
+const TITLE_FETCH_TIMEOUT_MS = 3000;
+const TITLE_FETCH_MAX_BYTES = 64 * 1024;
+const MAX_TITLE_LENGTH = 200;
+
 async function fetchWebsiteTitle(url, fallback) {
   if (fallback) return fallback;
   try {
-    await assertSafePublicHttpUrl(url);
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 3000);
-    const response = await fetch(url, {
-      signal: controller.signal,
-      headers: { "User-Agent": "Mozilla/5.0" },
+    // safeFetchText re-validates every redirect hop, pins the connection to
+    // validated public addresses (anti DNS-rebinding), shares one timeout across
+    // the whole exchange and caps the body size. A plain fetch() would follow
+    // redirects to internal hosts (e.g. 169.254.169.254) after the single
+    // up-front check, and would buffer an unbounded response.
+    const response = await safeFetchText(url, {
+      timeoutMs: TITLE_FETCH_TIMEOUT_MS,
+      maxBytes: TITLE_FETCH_MAX_BYTES,
+      maxRedirects: 3,
+      headers: {
+        "User-Agent": "Mozilla/5.0",
+        Accept: "text/html,application/xhtml+xml",
+      },
     });
-    clearTimeout(timeoutId);
     if (!response.ok) return deriveTitle(url);
-    const text = await response.text();
-    const match = text.match(/<title[^>]*>([^<]+)<\/title>/i);
+    const match = response.text.match(/<title[^>]*>([^<]+)<\/title>/i);
     if (match && match[1]) {
-      return match[1].trim().replace(/\s+/g, " ");
+      return match[1].trim().replace(/\s+/g, " ").slice(0, MAX_TITLE_LENGTH);
     }
     return deriveTitle(url);
   } catch (e) {
