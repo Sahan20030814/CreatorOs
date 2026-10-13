@@ -38,6 +38,7 @@ function createUpstashRestClient(url, token) {
         expire: (key, seconds) => command(['EXPIRE', key, seconds]),
         ttl: (key) => command(['TTL', key]),
         del: (key) => command(['DEL', key]),
+        eval: (script, numKeys, ...args) => command(['EVAL', script, numKeys, ...args]),
         quit: async () => undefined,
     };
 }

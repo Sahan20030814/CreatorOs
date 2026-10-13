@@ -1,6 +1,9 @@
 const crypto = require("crypto");
 const User = require("../model/user");
 
+// Bound external calls so they cannot outlive the booking lock held around them.
+const GOOGLE_API_TIMEOUT_MS = 10000;
+
 /**
  * Service to handle Google Calendar Integration and fallback mock behavior.
  */
@@ -219,6 +222,7 @@ class GoogleCalendarService {
             "Content-Type": "application/json",
           },
           body: JSON.stringify(eventPayload),
+          signal: AbortSignal.timeout(GOOGLE_API_TIMEOUT_MS),
         }
       );
 
@@ -273,6 +277,7 @@ class GoogleCalendarService {
           headers: {
             Authorization: `Bearer ${tokens.accessToken}`,
           },
+          signal: AbortSignal.timeout(GOOGLE_API_TIMEOUT_MS),
         }
       );
       return { success: true };

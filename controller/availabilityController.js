@@ -1,6 +1,7 @@
 const EventType = require("../model/eventType");
 const MeetingBooking = require("../model/meetingBooking");
 const User = require("../model/user");
+const { activeBookingFilter } = require("../utils/bookingConflicts");
 const {
   parseDateParts,
   zonedDateTimeToUtc,
@@ -94,7 +95,7 @@ exports.getAvailableSlots = async (req, res) => {
 
     const existingBookings = await MeetingBooking.find({
       userId: creator._id,
-      status: "scheduled",
+      ...activeBookingFilter(),
       startTime: { $gte: startOfDay, $lt: startOfNextDay },
     }).lean();
 

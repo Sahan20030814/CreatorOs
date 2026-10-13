@@ -4,37 +4,12 @@ const User = require("../model/user");
 const GoogleCalendarService = require("../services/googleCalendarService");
 const { generateState, validateState } = require("../utils/oauthState");
 const { createRedisClient } = require("../utils/redisClient");
+const { acquireLock, releaseLock } = require("../utils/distributedLock");
+const { buildConflictQuery } = require("../utils/bookingConflicts");
 
 const redis = createRedisClient();
-const memoryLocks = new Set();
 
-async function acquireLock(key, ttlSeconds) {
-  if (!redis) {
-    if (memoryLocks.has(key)) return false;
-    memoryLocks.add(key);
-    setTimeout(() => memoryLocks.delete(key), ttlSeconds * 1000);
-    return true;
-  }
-  try {
-    const result = await redis.set(key, "1", "EX", ttlSeconds, "NX");
-    return result === "OK";
-  } catch (err) {
-    console.error("[Mutex] Redis lock error:", err);
-    return false;
-  }
-}
-
-async function releaseLock(key) {
-  if (!redis) {
-    memoryLocks.delete(key);
-    return;
-  }
-  try {
-    await redis.del(key);
-  } catch (err) {
-    console.error("[Mutex] Redis unlock error:", err);
-  }
-}
+const BOOKING_LOCK_TTL_SECONDS = 30;
 
 
 /**
@@ -513,19 +488,25 @@ exports.createBooking = async (req, res) => {
     } 
     // Conflict check & 2PC Lock
     const lockKey = `calendar_lock:${creator._id}`;
-    const acquired = await acquireLock(lockKey, 15);
-    if (!acquired) {
+    const lockToken = await acquireLock(redis, lockKey, BOOKING_LOCK_TTL_SECONDS);
+    if (!lockToken) {
       return res.status(409).json({ success: false, message: "Server is busy processing another booking for this creator. Please try again in a few seconds." });
     }
 
     let booking = null;
+    let gCalResult = null;
     try {
-      const existingConflict = await MeetingBooking.findOne({
-        userId: creator._id,
-        status: "scheduled",
-        startTime: { $lt: end },
-        endTime: { $gt: start },
-      });
+      // Same buffer rules as the slot picker, and pending_sync bookings (Google sync in
+      // flight) count as taken so a slow external call cannot be raced.
+      const existingConflict = await MeetingBooking.findOne(
+        buildConflictQuery({
+          userId: creator._id,
+          start,
+          end,
+          bufferBeforeMs: (eventType.bufferBefore || 0) * 60 * 1000,
+          bufferAfterMs: (eventType.bufferAfter || 0) * 60 * 1000,
+        })
+      );
 
       if (existingConflict) {
         return res.status(409).json({ success: false, message: "This time slot is no longer available. Please select another slot." });
@@ -547,11 +528,9 @@ exports.createBooking = async (req, res) => {
       });
 
       // 2PC Phase 2: External Google Calendar API
-      const gCalResult = await GoogleCalendarService.createCalendarEvent(creator, {
+      gCalResult = await GoogleCalendarService.createCalendarEvent(creator, {
         title: `${eventType.title} with ${attendeeName}`,
-        description: `Meeting arranged via CreatorOS
-
-Notes: ${attendeeNotes || "None"}`,
+        description: `Meeting arranged via CreatorOS\n\nNotes: ${attendeeNotes || "None"}`,
         startTime: start,
         endTime: end,
         attendeeName,
@@ -571,9 +550,17 @@ Notes: ${attendeeNotes || "None"}`,
       if (booking) {
         await MeetingBooking.deleteOne({ _id: booking._id });
       }
+      // The calendar event may already exist if the commit step failed; do not leave it orphaned.
+      if (gCalResult && gCalResult.eventId) {
+        try {
+          await GoogleCalendarService.deleteCalendarEvent(creator, gCalResult.eventId);
+        } catch (cleanupErr) {
+          console.error("[Booking] Failed to clean up calendar event after rollback:", cleanupErr);
+        }
+      }
       throw err;
     } finally {
-      await releaseLock(lockKey);
+      await releaseLock(redis, lockKey, lockToken);
     }
 
     return res.status(201).json({
